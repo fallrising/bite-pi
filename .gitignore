@@ -1,5 +1,6 @@
 # runtime / local
 .env
+platform/.env
 *.log
 .DS_Store
 

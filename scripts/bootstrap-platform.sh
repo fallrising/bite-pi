@@ -8,6 +8,9 @@ OUT="$ROOT/platform"
 
 DOMAIN="${DOMAIN:-apps.local}"
 ENABLE_APM="${ENABLE_APM:-0}"
+ENABLE_LLM_GATEWAY="${ENABLE_LLM_GATEWAY:-1}"
+# Bind LLM gateway to loopback by default (safer on public VPS). Use 0.0.0.0 only behind firewall/VPN.
+NINE_ROUTER_BIND="${NINE_ROUTER_BIND:-127.0.0.1}"
 GRAFANA_ADMIN_PASSWORD="${GRAFANA_ADMIN_PASSWORD:-changeme}"
 COMPOSE_PROJECT="${COMPOSE_PROJECT:-platform}"
 
@@ -20,6 +23,12 @@ free -h 2>/dev/null | sed -n '1,2p' || true
 echo "docker:"
 docker version --format '{{.Server.Version}}' 2>/dev/null || echo "(docker not reachable)"
 docker compose version 2>/dev/null || true
+echo "ports of interest (ss if available):"
+if command -v ss >/dev/null 2>&1; then
+  ss -lnt | grep -E ':(80|443|3000|9090|3100|8080|11800|12800|20128)\s' || echo "(none of 80/3000/9090/3100/20128/... listening)"
+else
+  echo "(ss not available)"
+fi
 
 echo "==> [generate] platform into $OUT"
 mkdir -p \
@@ -30,7 +39,8 @@ mkdir -p \
   "$OUT/loki" \
   "$OUT/promtail" \
   "$OUT/skywalking" \
-  "$OUT/ci"
+  "$OUT/ci" \
+  "$OUT/clients"
 
 # --- docker network note is embedded in compose ---
 cat > "$OUT/docker-compose.yml" <<EOF
@@ -47,6 +57,7 @@ volumes:
   prometheus_data:
   loki_data:
   skywalking_es: {}
+  nine_router_data: {}
 
 services:
   nginx:
@@ -111,6 +122,28 @@ services:
     restart: unless-stopped
 EOF
 
+if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+  cat >> "$OUT/docker-compose.yml" <<EOF
+
+  # LLM gateway — official 9router (OpenAI-compatible /v1)
+  # Dashboard: http://127.0.0.1:20128/dashboard
+  # Clients (Pi / OpenCode / etc.): http://127.0.0.1:20128/v1
+  # Configure upstream providers in the dashboard — do not commit API keys.
+  nine_router:
+    image: decolua/9router:latest
+    ports:
+      - "${NINE_ROUTER_BIND}:20128:20128"
+    volumes:
+      - nine_router_data:/app/data
+    environment:
+      DATA_DIR: /app/data
+      PORT: "20128"
+      HOSTNAME: "0.0.0.0"
+    networks: [edge]
+    restart: unless-stopped
+EOF
+fi
+
 if [[ "$ENABLE_APM" == "1" ]]; then
   cat >> "$OUT/docker-compose.yml" <<'EOF'
 
@@ -174,6 +207,11 @@ upstream grafana_upstream {
   server grafana:3000;
 }
 
+# Optional: uncomment to expose LLM gateway via nginx (prefer auth / IP allowlist first).
+# upstream nine_router_upstream {
+#   server nine_router:20128;
+# }
+
 server {
   listen 80;
   server_name ${DOMAIN};
@@ -183,6 +221,15 @@ server {
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
   }
+
+  # location /llm/ {
+  #   proxy_pass http://nine_router_upstream/;
+  #   proxy_set_header Host \$host;
+  #   proxy_set_header X-Real-IP \$remote_addr;
+  #   proxy_http_version 1.1;
+  #   proxy_buffering off;
+  #   proxy_read_timeout 3600s;
+  # }
 
   # Example business app slots — point these at your compose services
   # after joining network platform_edge:
@@ -350,12 +397,82 @@ Idea:
 This is intentionally tiny. Expand with health checks, blue/green, and secrets as needed.
 EOF
 
+# --- LLM client templates (Pi / OpenCode) ---
+cat > "$OUT/clients/README.md" <<'EOF'
+# Client wiring for 9router (LLM gateway)
+
+9router exposes an OpenAI-compatible API at `http://127.0.0.1:20128/v1`.
+
+Do not confuse:
+
+| Name | Role |
+|------|------|
+| **OpenCode CLI** | Client tool — point its provider base URL at 9router `/v1` |
+| **OpenCode Free** | A free *upstream provider inside* 9router (passthrough to opencode.ai) |
+
+## First-time 9router setup
+
+1. `docker compose up -d nine_router`
+2. Open `http://127.0.0.1:20128/dashboard`
+3. Set dashboard password / copy the gateway API key
+4. Connect providers (OpenRouter, Anthropic, OpenAI, OpenCode Free, …)
+5. Wire Pi / OpenCode using the templates in this folder
+
+Compliance note: subscription and free-tier channels must follow each provider's terms; this stack does not bypass ToS.
+EOF
+
+cat > "$OUT/clients/pi-models.json.example" <<'EOF'
+{
+  "providers": {
+    "nine": {
+      "baseUrl": "http://127.0.0.1:20128/v1",
+      "api": "openai-completions",
+      "apiKey": "NINE_ROUTER_API_KEY"
+    }
+  }
+}
+EOF
+
+cat > "$OUT/clients/opencode.jsonc.example" <<'EOF'
+{
+  // Merge into your OpenCode config. Replace the API key from 9router dashboard.
+  // Optional: community plugin opencode-9router-plugin for dynamic model discovery.
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "nine": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "9router",
+      "options": {
+        "baseURL": "http://127.0.0.1:20128/v1",
+        "apiKey": "{env:NINE_ROUTER_API_KEY}"
+      },
+      "models": {
+        "auto": {
+          "name": "9router default / combo model — rename after dashboard setup"
+        }
+      }
+    }
+  }
+}
+EOF
+
+cat > "$OUT/.env.example" <<'EOF'
+# Local secrets for platform compose — copy to .env and keep out of git.
+# Most LLM keys are configured inside 9router dashboard (persisted in volume).
+# Optional: export for client tools on the same host.
+NINE_ROUTER_API_KEY=replace-me-from-dashboard
+EOF
+
 {
   echo "# Platform inventory"
   echo
   echo "Generated at: $(date -Iseconds)"
   echo "Domain: \`${DOMAIN}\`"
   echo "APM enabled in compose file: \`${ENABLE_APM}\`"
+  echo "LLM gateway (9router) enabled: \`${ENABLE_LLM_GATEWAY}\`"
+  if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+    echo "9router bind: \`${NINE_ROUTER_BIND}:20128\`"
+  fi
   echo
   echo "| Service | Port | Role |"
   echo "|---------|------|------|"
@@ -364,6 +481,9 @@ EOF
   echo "| grafana | 3000 | dashboards (admin / ${GRAFANA_ADMIN_PASSWORD}) |"
   echo "| loki | 3100 | log store |"
   echo "| promtail | (internal) | ship container logs to Loki |"
+  if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+    echo "| nine_router | ${NINE_ROUTER_BIND}:20128 | LLM gateway — OpenAI-compatible \`/v1\` + dashboard |"
+  fi
   if [[ "$ENABLE_APM" == "1" ]]; then
     echo "| skywalking-oap | 11800 / 12800 | APM backend (compose profile \`apm\`) |"
     echo "| skywalking-ui | 8080 | APM UI (compose profile \`apm\`) |"
@@ -374,6 +494,10 @@ EOF
   echo '```bash'
   echo 'cd platform'
   echo 'docker compose up -d'
+  if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+    echo '# LLM gateway: http://127.0.0.1:20128/dashboard'
+    echo '# Wire clients: see clients/README.md'
+  fi
   if [[ "$ENABLE_APM" == "1" ]]; then
     echo 'docker compose --profile apm up -d   # optional APM'
   fi
@@ -385,6 +509,15 @@ EOF
   echo "2. Add Nginx upstream/location in \`nginx/conf.d/\`"
   echo "3. Add Prometheus scrape job if the app exposes \`/metrics\`"
   echo "4. Reload nginx: \`docker compose exec nginx nginx -s reload\`"
+  if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+    echo
+    echo "## LLM clients (Pi / OpenCode)"
+    echo
+    echo "1. Start \`nine_router\` and open the dashboard"
+    echo "2. Connect upstream providers (API keys stay in 9router data volume)"
+    echo "3. Copy templates from \`clients/\` into Pi / OpenCode config"
+    echo "4. Prefer bind \`127.0.0.1\` — do not expose 20128 on the public internet without auth"
+  fi
 } > "$OUT/INVENTORY.md"
 
 {
@@ -392,6 +525,8 @@ EOF
   echo
   echo "- domain: ${DOMAIN}"
   echo "- enable_apm: ${ENABLE_APM}"
+  echo "- enable_llm_gateway: ${ENABLE_LLM_GATEWAY}"
+  echo "- nine_router_bind: ${NINE_ROUTER_BIND}"
   echo "- generator: scripts/bootstrap-platform.sh"
   echo
 } >> "$OUT/CHANGELOG.md"
@@ -399,6 +534,11 @@ EOF
 echo "==> done"
 echo "Read: $OUT/INVENTORY.md"
 echo "Validate: cd platform && docker compose config"
+if [[ "$ENABLE_LLM_GATEWAY" == "1" ]]; then
+  echo "LLM gateway: docker compose up -d nine_router"
+  echo "Dashboard: http://127.0.0.1:20128/dashboard"
+  echo "Client templates: $OUT/clients/"
+fi
 if [[ "$ENABLE_APM" == "1" ]]; then
   echo "APM services use profile 'apm': docker compose --profile apm up -d"
 fi

@@ -11,6 +11,31 @@
 
 官網：https://pi.dev/
 
+Pi **自己不帶模型**；腦（LLM）靠你接的 API。本專案用 **9router** 當 VPS 上的統一 LLM 網關。
+
+---
+
+## LLM Gateway = 9router
+
+本平臺預設接入官方映像 [`decolua/9router`](https://github.com/decolua/9router)（MIT），**不把 9router 源碼 vendor 進倉庫**。
+
+| 項目 | 說明 |
+|------|------|
+| 端點 | `http://127.0.0.1:20128/v1`（OpenAI-compatible） |
+| Dashboard | `http://127.0.0.1:20128/dashboard` |
+| 上游 | 在 Dashboard 接 OpenRouter / Anthropic / OpenAI / OpenCode Free / … |
+| 客戶端範本 | `platform/clients/`（Pi、OpenCode） |
+| 預設綁定 | `127.0.0.1`（公網 VPS 較安全；勿裸露 20128） |
+
+「OpenCode」別搞混：
+
+| 名稱 | 角色 |
+|------|------|
+| **OpenCode CLI** | 客戶端；把 provider 指到 9router `/v1` |
+| **OpenCode Free** | 9router **內部**的免費上游（透傳 opencode.ai） |
+
+合規提醒：訂閱 / 免費通道請自行遵守各家服務條款；本專案不協助規避 ToS。
+
 ---
 
 ## 你的想像對不對？
@@ -29,7 +54,7 @@
 更準確的比喻：
 
 > Pi 不是藥，是**會照著你食譜下廚的廚師**。  
-> 食譜（Skill）寫得好，VPS 上就能快速長出 Nginx + Prometheus + Grafana + 日誌 + CI。  
+> 食譜（Skill）寫得好，VPS 上就能快速長出 Nginx + Prometheus + Grafana + 日誌 + CI + LLM 網關。  
 > 食譜沒寫、或機器環境亂，它就會亂炒。
 
 ---
@@ -41,6 +66,7 @@
 - Nginx 路由
 - Prometheus + Grafana 監控
 - Loki + Promtail 日誌
+- **9router LLM 網關**（接各家 API，供 Pi / OpenCode 使用）
 - SkyWalking（APM，可選）
 - 簡易 Docker CI/CD 流水線骨架
 
@@ -65,6 +91,7 @@ cd platform
 docker compose config   # 驗證 compose 語法
 # 若要真的拉起來（會佔資源）：
 # docker compose up -d
+# docker compose up -d nine_router   # LLM 網關
 ```
 
 生成後目錄大致是：
@@ -77,6 +104,7 @@ platform/
   grafana/
   loki/
   promtail/
+  clients/             # Pi / OpenCode 接線範本
   skywalking/          # profile=apm 才啟用
   ci/                  # 簡易 CI 腳本骨架
   INVENTORY.md         # 這臺 VPS 上「裝了什麼」
@@ -85,8 +113,20 @@ platform/
 自訂域名 / 開關模組：
 
 ```bash
-DOMAIN=api.example.com ENABLE_APM=1 ./scripts/bootstrap-platform.sh
+DOMAIN=api.example.com ENABLE_APM=1 ENABLE_LLM_GATEWAY=1 NINE_ROUTER_BIND=127.0.0.1 ./scripts/bootstrap-platform.sh
 ```
+
+關掉 LLM 網關：`ENABLE_LLM_GATEWAY=0`。
+
+### 接上 Pi（示例）
+
+1. 啟動 `nine_router`，在 dashboard 複製 gateway API key  
+2. 把 `platform/clients/pi-models.json.example` 合併進 `~/.pi/agent/models.json`  
+3. 把 `NINE_ROUTER_API_KEY` 換成真實 key，Pi 內 `/model` 選 `nine/...`
+
+### 接上 OpenCode CLI（示例）
+
+見 `platform/clients/opencode.jsonc.example`。可選社群 plugin：`opencode-9router-plugin` 做動態模型列表。
 
 ---
 
@@ -102,7 +142,7 @@ pi
 
 # 3. 對 Pi 說（自然語言即可）
 # 「讀 platform-bootstrap skill，幫我在這臺 VPS 生成基礎平臺，
-#   要 nginx、prometheus、grafana、loki，域名用 apps.local」
+#   要 nginx、prometheus、grafana、loki、9router，域名用 apps.local」
 ```
 
 Pi 會：讀 Skill → 探測磁碟/埠/Docker → 寫 compose 與設定 →（經你同意後）執行 `docker compose up`。
@@ -113,9 +153,10 @@ Pi 會：讀 Skill → 探測磁碟/埠/Docker → 寫 compose 與設定 →（�
 
 1. **Skill 當契約**：把「允許裝什麼、預設埠、不能亂刪資料」寫死在 Skill
 2. **產出要進 Git**：`platform/` 當 IaC 倉庫，不要只留在對話裡
-3. **分階段**：先監控+日誌，再 APM，再 CI；別一次全上
+3. **分階段**：先監控+日誌+LLM 網關，再 APM，再 CI；別一次全上
 4. **人審核**：compose、Nginx、防火牆規則一定要看過再 `up`
-5. **Pi 負責變更，狀態靠系統**：Prometheus/Grafana/Loki 自己持久化；Pi 不管長期運維狀態
+5. **Pi 負責變更，狀態靠系統**：Prometheus/Grafana/Loki/9router 自己持久化；Pi 不管長期運維狀態
+6. **LLM key 不進 Git**：上游 key 只放 9router dashboard / volume；客戶端用環境變數
 
 ---
 

@@ -11,6 +11,7 @@ volumes:
   prometheus_data:
   loki_data:
   skywalking_es: {}
+  nine_router_data: {}
 
 services:
   nginx:
@@ -72,6 +73,23 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [edge]
     depends_on: [loki]
+    restart: unless-stopped
+
+  # LLM gateway — official 9router (OpenAI-compatible /v1)
+  # Dashboard: http://127.0.0.1:20128/dashboard
+  # Clients (Pi / OpenCode / etc.): http://127.0.0.1:20128/v1
+  # Configure upstream providers in the dashboard — do not commit API keys.
+  nine_router:
+    image: decolua/9router:latest
+    ports:
+      - "127.0.0.1:20128:20128"
+    volumes:
+      - nine_router_data:/app/data
+    environment:
+      DATA_DIR: /app/data
+      PORT: "20128"
+      HOSTNAME: "0.0.0.0"
+    networks: [edge]
     restart: unless-stopped
 
   # Optional APM — enable with ENABLE_APM=1
