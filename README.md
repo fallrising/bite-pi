@@ -1,3 +1,12 @@
+> ## ⚠️ 此 repository 已退役（2026-09-04）
+>
+> 內容已遷移至 [`newclear`](https://github.com/fallrising/newclear) 的 [`examples/bite-pi`](https://github.com/fallrising/newclear/tree/main/examples/bite-pi)。
+>
+> 本 repository 保留為**唯讀歷史存放地**——完整 git 歷史仍在此處,
+> 但新的開發請至後繼者。
+
+---
+
 # Pi Agent × 基礎平臺 Demo
 
 ## Pi 是什麼（30 秒版）
